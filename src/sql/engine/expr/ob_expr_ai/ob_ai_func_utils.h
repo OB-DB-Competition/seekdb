@@ -279,6 +279,7 @@ private:
 class ObAIFuncUtils 
 {
 public:
+  static int validate_completion_config(ObJsonObject *config);
   ObAIFuncUtils() {}
   virtual ~ObAIFuncUtils() {}
   static bool is_completion_type(const ObAIFuncExprInfo *info) {return info->type_ == share::EndpointType::COMPLETION;}
