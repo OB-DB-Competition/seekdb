@@ -10975,5 +10975,18 @@
     "info_cn": "",
     "background_cn": "",
     "ref_url": ""
+  },
+  "enable_file_sql": {
+    "id": 10754,
+    "name": "enable_file_sql",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "Enable local file table functions and COPY to CSV.",
+    "flags": "GLOBAL | SESSION | INFLUENCE_PLAN | NEED_SERIALIZE",
+    "publish_version": "1.0.0.0",
+    "info_cn": "启用本地文件表函数和 CSV 导出",
+    "background_cn": "",
+    "ref_url": ""
   }
 }

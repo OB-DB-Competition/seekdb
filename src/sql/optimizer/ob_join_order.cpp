@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_JO
 #include "config_bridge.h"
 #include "ob_join_order.h"
+#include "sql/engine/basic/ob_file_sql.h"
 #include "sql/optimizer/ob_skyline_prunning.h"
 #include "sql/optimizer/ob_log_table_scan.h"
 #include "sql/rewrite/ob_transform_utils.h"
@@ -8518,11 +8519,19 @@ int ObJoinOrder::generate_function_table_paths()
     func_path->parent_ = this;
     ObSEArray<ObExecParamRawExpr *, 4> nl_params;
     ObRawExpr* function_table_expr = NULL;
-    // magic number ? todo refine this
     output_rows_ = 199;
     output_row_size_ = 199;
+    if (table_item->is_file_table()) {
+      file_sql::Plan file;
+      const auto *expr = static_cast<const ObConstRawExpr *>(table_item->function_table_expr_);
+      if (OB_FAIL(file.decode(expr->get_value().get_string()))) {
+      } else {
+        output_rows_ = static_cast<double>(file.row_count);
+      }
+    }
     func_path->strong_sharding_ = get_plan()->get_optimizer_context().get_match_all_sharding();
-    if (OB_FAIL(func_path->set_parallel_info_for_match_all())) {
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(func_path->set_parallel_info_for_match_all())) {
     } else if (OB_FAIL(ObOptimizerUtil::classify_subquery_exprs(get_restrict_infos(),
                                                                 func_path->subquery_exprs_,
                                                                 func_path->filter_,

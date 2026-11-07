@@ -312,6 +312,16 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
     if (OB_FAIL(params_.schema_checker_->check_column_exists(
         table_id, col_name, is_exist))) {
     }
+  } else if (table_item.is_file_table()) {
+    if (OB_ISNULL(dml_stmt_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      for (int64_t i = 0; !is_exist && i < dml_stmt_->get_column_size(); ++i) {
+        const ColumnItem &column = dml_stmt_->get_column_items().at(i);
+        is_exist = column.table_id_ == table_item.table_id_
+            && ObCharset::case_insensitive_equal(column.column_name_, col_name);
+      }
+    }
   } else if (table_item.is_function_table()) {
     if (OB_FAIL(ObResolverUtils::check_function_table_column_exist(table_item,
                                                                    params_,

@@ -450,6 +450,16 @@ void ObStaticEngineCG::exprs_not_support_vectorize(const ObIArray<ObRawExpr *> &
   }
 }
 
+static bool is_local_file_scan(const ObLogicalOperator &op)
+{
+  if (op.get_type() != log_op_def::LOG_FUNCTION_TABLE || op.get_stmt() == nullptr) {
+    return false;
+  }
+  const auto &scan = static_cast<const ObLogFunctionTable &>(op);
+  const TableItem *table = op.get_stmt()->get_table_item_by_id(scan.get_table_id());
+  return table != nullptr && table->is_file_table();
+}
+
 // Enable vectorization as long as one logical operator support vectorization.
 // One exception is that if any operator explicitly forbidden vectorization,
 // disable vectorization for the whole plan
@@ -473,13 +483,13 @@ int ObStaticEngineCG::check_vectorize_supported(bool &support,
       ObPhyOperatorType type = PHY_INVALID;
       if (OB_FAIL(get_phy_op_type(*op, type, is_root_job))) {
       } else {
-      if (ObOperatorFactory::is_vectorized(type)) {
+      if (ObOperatorFactory::is_vectorized(type) || is_local_file_scan(*op)) {
         support = true;
       }
       ret = check_op_vectorization(op, schema_guard, type, disable_vectorize);
       if (OB_FAIL(ret)) {
-      } else if (log_op_def::LOG_TABLE_SCAN == op->get_type()) {
-         LOG_DEBUG("TableScan base table rows ", K(op->get_card()));
+      } else if (log_op_def::LOG_TABLE_SCAN == op->get_type() || is_local_file_scan(*op)) {
+         LOG_DEBUG("Scan base table rows ", K(op->get_card()));
          scan_cardinality = common::max(scan_cardinality, op->get_card());
       }
       if (OB_SUCC(ret) && !disable_vectorize) {
@@ -5479,6 +5489,7 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
     }
     if (OB_SUCC(ret)) {
       spec.into_type_ = op.get_into_type();
+      spec.file_copy_ = op.file_copy_;
       spec.is_optional_ = op.get_is_optional();
       spec.is_single_ = op.get_is_single();
       spec.max_file_size_ = op.get_max_file_size();
@@ -5500,6 +5511,9 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   ObRawExpr *value_raw_expr = nullptr;
   ObExpr *value_expr = nullptr;
   int ret = OB_SUCCESS;
+  ObSEArray<ObRawExpr *, 16> file_access_exprs;
+  const TableItem *table = op.get_stmt() ? op.get_stmt()->get_table_item_by_id(op.get_table_id()) : nullptr;
+  const bool file_table = table && table->is_file_table();
   if (OB_ISNULL(op.get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(spec.column_exprs_.init(op.get_stmt()->get_column_size()))) {
@@ -5507,8 +5521,17 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(value_raw_expr = op.get_value_expr())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(generate_rt_expr(*value_raw_expr, value_expr))) {
+  } else if (file_table && OB_FAIL(spec.file_columns_.init(op.get_stmt()->get_column_size()))) {
+  } else if (file_table && OB_FAIL(ob_write_string(
+                 alloc, static_cast<ObConstRawExpr *>(value_raw_expr)->get_value().get_string(), spec.file_plan_))) {
+  } else if (!file_table && OB_FAIL(generate_rt_expr(*value_raw_expr, value_expr))) {
   } else {
+    if (file_table) {
+      spec.max_batch_size_ = std::min<int64_t>(16, phy_plan_->get_batch_size());
+      OZ (ObRawExprUtils::extract_column_exprs(op.get_output_exprs(), file_access_exprs));
+      OZ (ObRawExprUtils::extract_column_exprs(op.get_filter_exprs(), file_access_exprs));
+      OZ (ObRawExprUtils::extract_column_exprs(op.get_startup_exprs(), file_access_exprs));
+    }
     spec.has_correlated_expr_ = value_raw_expr->has_flag(CNT_DYNAMIC_PARAM);
     spec.value_expr_ = value_expr;
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
@@ -5522,10 +5545,14 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
       CK (OB_NOT_NULL(col_item->expr_));
       if (OB_SUCC(ret)
           && col_item->table_id_ == op.get_table_id()
-          && col_item->expr_->is_explicited_reference()) {
+          && (file_table ? ObOptimizerUtil::find_item(file_access_exprs, static_cast<ObRawExpr *>(col_item->expr_))
+                         : col_item->expr_->is_explicited_reference())) {
         OZ (mark_expr_self_produced(col_item->expr_));
         OZ (generate_rt_expr(*col_item->expr_, rt_expr));
         OZ (spec.column_exprs_.push_back(rt_expr));
+        if (file_table) {
+          OZ (spec.file_columns_.push_back(col_item->column_id_ - OB_APP_MIN_COLUMN_ID));
+        }
       }
     }
   }
@@ -6499,7 +6526,7 @@ int ObStaticEngineCG::exist_registered_vec_op(ObLogicalOperator &op, const bool 
   ObPhyOperatorType phy_type = PHY_INVALID;
   exist = false;
   if (OB_FAIL(get_phy_op_type(op, phy_type, is_root_job))) {
-  } else if (ObOperatorFactory::is_vectorized(phy_type)) {
+  } else if (ObOperatorFactory::is_vectorized(phy_type) || is_local_file_scan(op)) {
     exist = true;
   } else {
     for (int i = 0; !exist && OB_SUCC(ret) && i < op.get_num_of_child(); i++) {

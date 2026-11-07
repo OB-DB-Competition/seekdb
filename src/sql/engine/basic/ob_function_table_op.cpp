@@ -17,8 +17,10 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/basic/ob_function_table_op.h"
+#include "sql/engine/basic/ob_file_sql.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
+#include "sql/pl/ob_pl_user_type.h"
 
 
 namespace oceanbase
@@ -27,14 +29,38 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_);
+OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_, file_plan_, file_columns_);
 
 int ObFunctionTableOp::inner_open()
 {
   int ret = OB_SUCCESS;
   node_idx_ = 0;
   already_calc_ = false;
-  if (OB_ISNULL(MY_SPEC.value_expr_)) {
+  if (!MY_SPEC.file_plan_.empty()) {
+    bool enabled = false;
+    ObString secure;
+    ObSQLSessionInfo *session = ctx_.get_my_session();
+    if (OB_ISNULL(session)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+    } else if (!enabled) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL requires enable_file_sql");
+    } else if (OB_FAIL(session->get_secure_file_priv(secure))) {
+    } else {
+      std::vector<int> projection;
+      for (int64_t i = 0; i < MY_SPEC.file_columns_.count(); ++i) {
+        projection.push_back(MY_SPEC.file_columns_.at(i));
+      }
+      file_scanner_ = new (std::nothrow) file_sql::Scanner;
+      if (OB_ISNULL(file_scanner_)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (OB_FAIL(file_scanner_->open(secure, MY_SPEC.file_plan_, projection))) {
+        delete file_scanner_;
+        file_scanner_ = nullptr;
+      }
+    }
+  } else if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
@@ -48,6 +74,8 @@ int ObFunctionTableOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_rescan())) {
+  } else if (file_scanner_ != nullptr) {
+    ret = file_scanner_->rescan();
   } else {
     node_idx_ = 0;
     if (MY_SPEC.has_correlated_expr_) {
@@ -63,6 +91,8 @@ int ObFunctionTableOp::inner_rescan()
 int ObFunctionTableOp::inner_close()
 {
   int ret = OB_SUCCESS;
+  delete file_scanner_;
+  file_scanner_ = nullptr;
   node_idx_ = 0;
   row_count_ = 0;
   col_count_ = 0;
@@ -72,6 +102,8 @@ int ObFunctionTableOp::inner_close()
 
 void ObFunctionTableOp::destroy()
 {
+  delete file_scanner_;
+  file_scanner_ = nullptr;
   ObOperator::destroy();
 }
 
@@ -101,7 +133,93 @@ int ObFunctionTableOp::get_current_result(ObObj &result)
 
 int ObFunctionTableOp::inner_get_next_row()
 {
+  if (file_scanner_) {
+    clear_evaluated_flag();
+    return inner_get_next_file_row(0);
+  }
   return (this->*next_row_func_)();
+}
+
+int ObFunctionTableOp::inner_get_next_batch(int64_t max_row_cnt)
+{
+  if (file_scanner_ == nullptr) { return ObOperator::inner_get_next_batch(max_row_cnt); }
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  ObEvalCtx::BatchInfoScopeGuard guard(eval_ctx_);
+  guard.set_batch_size(max_row_cnt);
+  for (int64_t i = 0; OB_SUCC(ret) && i < max_row_cnt; ++i) {
+    guard.set_batch_idx(i);
+    if (OB_FAIL(inner_get_next_file_row(i))) {
+      if (ret == OB_ITER_END) {
+        brs_.end_ = true;
+        ret = OB_SUCCESS;
+      }
+      break;
+    }
+    ++brs_.size_;
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_file_row(int64_t batch_idx)
+{
+  int ret = OB_SUCCESS;
+  std::vector<file_sql::Cell> cells;
+  if (OB_FAIL(ctx_.check_status())) {
+  } else if (OB_FAIL(file_scanner_->next(cells))) {
+  } else if (cells.size() != MY_SPEC.column_exprs_.count()) {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  for (size_t i = 0; OB_SUCC(ret) && i < cells.size(); ++i) {
+    ObExpr &expr = *MY_SPEC.column_exprs_.at(i);
+    ObDatum &datum = expr.locate_datum_for_write(eval_ctx_);
+    const auto &cell = cells[i];
+    int64_t integer = 0;
+    double real = 0;
+    int16_t scale = 0;
+    if (cell.type == file_sql::Type::NIL) {
+      datum.set_null();
+    } else {
+      switch (expr.datum_meta_.type_) {
+        case ObIntType:
+          if (!file_sql::integer(cell.text, integer)) { ret = OB_INVALID_ARGUMENT; }
+          else { datum.set_int(integer); }
+          break;
+        case ObTinyIntType:
+          datum.set_int(ObString(cell.text.size(), cell.text.data()).case_compare("true") == 0);
+          break;
+        case ObDoubleType:
+          if (!file_sql::real(cell.text, real)) { ret = OB_INVALID_ARGUMENT; }
+          else { datum.set_double(real); }
+          break;
+        case ObDateType:
+        case ObDateTimeType:
+          if (!file_sql::calendar(cell.text, integer, scale)) {
+            ret = OB_INVALID_ARGUMENT;
+          } else if (expr.datum_meta_.type_ == ObDateType) {
+            datum.set_date(integer / file_sql::MICROS_PER_DAY);
+          } else {
+            datum.set_datetime(integer);
+          }
+          break;
+        default:
+          if (cell.text.empty()) {
+            datum.set_string("", 0);
+          } else {
+            char *mem = expr.get_str_res_mem(eval_ctx_, cell.text.size(), batch_idx);
+            if (OB_ISNULL(mem)) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+            } else {
+              MEMCPY(mem, cell.text.data(), cell.text.size());
+              datum.set_string(mem, cell.text.size());
+            }
+          }
+          break;
+      }
+    }
+    if (OB_SUCC(ret)) { expr.set_evaluated_projected(eval_ctx_); }
+  }
+  return ret;
 }
 
 int ObFunctionTableOp::inner_get_next_row_udf()

@@ -23,20 +23,24 @@
 
 namespace oceanbase
 {
+namespace pl { class ObPLCollection; }
 namespace sql
 {
 
 class ObExpr;
+namespace file_sql { class Scanner; }
 class ObFunctionTableSpec : public ObOpSpec
 {
 OB_UNIS_VERSION_V(1);
 public:
   ObFunctionTableSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type)
-    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false)
+    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false), file_columns_(alloc)
   {}
   ObExpr *value_expr_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> column_exprs_;
   bool has_correlated_expr_;
+  common::ObString file_plan_;
+  common::ObFixedArray<int32_t, common::ObIAllocator> file_columns_;
 };
 
 class ObFunctionTableOp : public ObOperator
@@ -54,10 +58,12 @@ public:
   virtual int inner_open() override;
   virtual int inner_rescan() override;
   virtual int inner_get_next_row() override;
-  //virtual int inner_get_next_batch(int64_t max_row_cnt) override;
+  int inner_get_next_batch(int64_t max_row_cnt) override;
   virtual int inner_close() override;
   virtual void destroy() override;
 private:
+  int inner_get_next_file_row(int64_t batch_idx);
+  file_sql::Scanner *file_scanner_ = nullptr;
   int inner_get_next_row_udf();
   int inner_get_next_row_sys_func();
   int get_current_result(common::ObObj &result);

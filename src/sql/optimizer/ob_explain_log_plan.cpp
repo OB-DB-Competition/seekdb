@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_OPT
 #include "sql/optimizer/ob_explain_log_plan.h"
+#include "sql/engine/basic/ob_file_sql.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/code_generator/ob_code_generator.h"
 
@@ -46,6 +47,8 @@ int ObExplainLogPlan::generate_normal_raw_plan()
     const ObExplainStmt *explain_stmt = static_cast<const ObExplainStmt*>(get_stmt());
     if (OB_ISNULL(child_stmt = explain_stmt->get_explain_query_stmt())) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (explain_stmt->file_describe_) {
+      return generate_file_describe(*static_cast<const ObSelectStmt *>(child_stmt));
     } else if (OB_ISNULL(child_plan = optimizer_context_.get_log_plan_factory().
                          create(optimizer_context_, *child_stmt))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -104,6 +107,52 @@ int ObExplainLogPlan::generate_normal_raw_plan()
       get_optimizer_context().set_plan_type(ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             false);
+    }
+  }
+  return ret;
+}
+
+int ObExplainLogPlan::generate_file_describe(const ObSelectStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  ObLogicalOperator *top = nullptr;
+  if (OB_FAIL(allocate_values_as_top(top))) {
+  } else {
+    auto &op = *static_cast<ObLogValues *>(top);
+    set_plan_root(top);
+    top->mark_is_plan_root();
+    set_max_op_id(1);
+    optimizer_context_.set_packed(false);
+    optimizer_context_.set_plan_type(OB_PHY_PLAN_LOCAL, OB_PHY_PLAN_LOCAL, false);
+    optimizer_context_.get_all_exprs().reuse();
+    for (int64_t i = 0; OB_SUCC(ret) && i < 6; ++i) {
+      ret = allocate_output_expr_for_values_op(op);
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < stmt.get_select_item_size(); ++i) {
+      const SelectItem &item = stmt.get_select_item(i);
+      const ObRawExpr &expr = *item.expr_;
+      using file_sql::Type;
+      Type kind = Type::TEXT;
+      switch (expr.get_data_type()) {
+        case ObTinyIntType: kind = Type::BOOL; break;
+        case ObIntType: kind = Type::INT; break;
+        case ObDoubleType: kind = Type::DOUBLE; break;
+        case ObDateType: kind = Type::DATE; break;
+        case ObDateTimeType: kind = Type::DATETIME; break;
+        default: break;
+      }
+      const bool nullable = !expr.is_not_null_for_read();
+      ObObj cells[6];
+      cells[0].set_varchar(item.alias_name_.empty() ? expr.get_expr_name() : item.alias_name_);
+      cells[1].set_varchar(file_sql::type_name(kind));
+      cells[2].set_varchar(nullable ? "YES" : "NO");
+      for (int j = 0; j < 3; ++j) { cells[j].set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI); }
+      for (int j = 3; j < 6; ++j) { cells[j].set_null(); }
+      ObNewRow row;
+      row.cells_ = cells;
+      row.count_ = 6;
+      if (OB_FAIL(op.add_row(row))) {
+      }
     }
   }
   return ret;

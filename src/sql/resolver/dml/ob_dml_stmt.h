@@ -190,6 +190,7 @@ struct TableItem
     JSON_TABLE,
     VALUES_TABLE,
     LATERAL_TABLE,
+    FILE_TABLE,
   };
 
   /**
@@ -221,7 +222,8 @@ struct TableItem
   bool is_fake_cte_table() const { return CTE_TABLE == type_; }
   bool is_has_sample_info() const { return sample_info_ != nullptr; }
   bool is_joined_table() const { return JOINED_TABLE == type_; }
-  bool is_function_table() const { return FUNCTION_TABLE == type_; }
+  bool is_file_table() const { return FILE_TABLE == type_; }
+  bool is_function_table() const { return FUNCTION_TABLE == type_ || is_file_table(); }
   bool is_json_table() const { return JSON_TABLE == type_; }  // json_table_def_->table_type_ == MulModeTableType::OB_ORA_JSON_TABLE_TYPE
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
 

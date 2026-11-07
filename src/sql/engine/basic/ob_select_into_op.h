@@ -75,6 +75,7 @@ public:
   {
   }
 
+  bool file_copy_ = false;
   ObItemType into_type_;
   common::ObFixedArray<common::ObString, common::ObIAllocator> user_vars_;
   common::ObObj outfile_name_;
@@ -187,6 +188,7 @@ public:
     int64_t pos_;
   };
 
+  int copy_to_file();
   virtual int inner_open() override;
   virtual int inner_close() override;
   virtual int inner_rescan() override;

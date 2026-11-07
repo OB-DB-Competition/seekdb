@@ -65,7 +65,11 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
       } else {
         explain_stmt->set_explain_query_stmt(static_cast<ObDMLStmt *>(child_stmt));
         ParseNode *format = parse_tree.children_[EXPLAIN_FORMAT];
-        if (NULL != format) {
+        // The parser marks bare DESCRIBE/DESC with a T_INT format node.
+        const bool is_describe = format != nullptr && format->type_ == T_INT;
+        explain_stmt->file_describe_ = is_describe && child_node->type_ == T_SELECT
+            && params_.query_ctx_->has_file_sql_;
+        if (format != nullptr && !is_describe) {
           switch (format->type_) {
           case T_OUTLINE:
           {

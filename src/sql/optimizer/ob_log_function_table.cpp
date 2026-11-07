@@ -80,6 +80,8 @@ int ObLogFunctionTable::get_plan_item_info(PlanText &plan_text,
   if (OB_FAIL(ObLogicalOperator::get_plan_item_info(plan_text, plan_item))) {
   } else if (OB_ISNULL(get_value_expr())) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (get_stmt()->get_table_item_by_id(table_id_)->is_file_table()) {
+    BUF_PRINT_STR("FILE SCAN", plan_item.operation_, plan_item.operation_len_);
   } else {
     BEGIN_BUF_PRINT;
     const ObRawExpr* value = get_value_expr();

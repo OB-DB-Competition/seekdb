@@ -31,6 +31,7 @@ namespace sql
     virtual ~ObExplainLogPlan() {}
   protected:
     virtual int generate_normal_raw_plan() override;
+  int generate_file_describe(const ObSelectStmt &stmt);
   private:
     int check_explain_generate_plan_with_outline(ObLogPlan *real_plan);
     DISALLOW_COPY_AND_ASSIGN(ObExplainLogPlan);

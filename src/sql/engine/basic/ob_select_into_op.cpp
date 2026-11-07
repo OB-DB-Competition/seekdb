@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
+#include "sql/engine/basic/ob_file_sql.h"
 #include <cmath>
 #include <memory>
 
@@ -38,7 +39,7 @@ OB_SERIALIZE_MEMBER(ObSelectIntoOpInput, task_id_, sqc_id_);
 OB_SERIALIZE_MEMBER((ObSelectIntoSpec, ObOpSpec), into_type_, user_vars_, outfile_name_,
     field_str_, line_str_, closed_cht_, is_optional_, select_exprs_, is_single_, max_file_size_,
     escaped_cht_, cs_type_, parallel_, buffer_size_, is_overwrite_,
-    external_properties_);
+    external_properties_, file_copy_);
 
 
 int ObSelectIntoOp::inner_open()
@@ -53,6 +54,7 @@ int ObSelectIntoOp::inner_open()
     if (OB_FAIL(session->get_sql_select_limit(top_limit_cnt_))) {
     }
   }
+  if (MY_SPEC.file_copy_) { return ret; }
   if (OB_SUCC(ret) && !MY_SPEC.external_properties_.str_.empty()) {
     if (OB_FAIL(external_properties_.load_from_string(MY_SPEC.external_properties_.str_,
                                                       ctx_.get_allocator()))) {
@@ -186,8 +188,110 @@ int ObSelectIntoOp::calc_outfile_path()
   }
   return ret;
 }
+int ObSelectIntoOp::copy_to_file()
+{
+  if (!is_first_) { return OB_SUCCESS; }
+  is_first_ = false;
+  int ret = OB_SUCCESS;
+  bool enabled = false;
+  ObString secure;
+  file_sql::Plan plan;
+  file_sql::CsvOutput output;
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  ObPhysicalPlanCtx *plan_ctx = ctx_.get_physical_plan_ctx();
+  if (OB_ISNULL(session) || OB_ISNULL(plan_ctx)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+  } else if (!enabled) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "COPY requires enable_file_sql");
+  } else if (OB_FAIL(session->get_secure_file_priv(secure))) {
+  } else if (OB_FAIL(plan.decode(MY_SPEC.external_properties_.str_))) {
+  } else if (plan.columns.size() != MY_SPEC.select_exprs_.count()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(output.open(secure, plan))) {
+  }
+  std::vector<file_sql::Cell> cells;
+  std::vector<char> buffer;
+  int64_t rows = 0;
+  bool end = false;
+  auto write_row = [&]() -> int {
+    int ret = OB_SUCCESS;
+    cells.clear();
+    for (int64_t i = 0; OB_SUCC(ret) && i < MY_SPEC.select_exprs_.count(); ++i) {
+      const ObExpr &expr = *MY_SPEC.select_exprs_.at(i);
+      ObDatum *datum = nullptr;
+      file_sql::Cell cell;
+      if (OB_FAIL(expr.eval(eval_ctx_, datum))) {
+      } else if (datum->is_null()) {
+      } else if (ob_is_string_type(expr.datum_meta_.type_)) {
+        ObString str = datum->get_string();
+        if (str.length() > file_sql::MAX_FIELD) { ret = OB_SIZE_OVERFLOW; }
+        else {
+          cell.type = file_sql::Type::TEXT;
+          cell.text.assign(str.ptr(), str.length());
+        }
+      } else if (ob_is_numeric_type(expr.datum_meta_.type_) ||
+                 ob_is_datetime_tc(expr.datum_meta_.type_) || expr.datum_meta_.type_ == ObDateType) {
+        ObObj value;
+        int64_t pos = 0;
+        if (buffer.empty()) { buffer.resize(file_sql::MAX_FIELD); }
+        if (OB_FAIL(datum->to_obj(value, expr.obj_meta_))) {
+        } else if (OB_FAIL(value.print_plain_str_literal(buffer.data(), buffer.size(), pos))) {
+        } else {
+          cell.type = file_sql::Type::INT; // scalars can be written unquoted
+          cell.text.assign(buffer.data(), pos);
+        }
+      } else {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "COPY output column type");
+      }
+      if (OB_SUCC(ret)) { cells.push_back(std::move(cell)); }
+    }
+    if (OB_SUCC(ret)) { ret = output.write(cells); }
+    return ret;
+  };
+  while (OB_SUCC(ret) && !end && rows < top_limit_cnt_) {
+    clear_evaluated_flag();
+    if (OB_FAIL(ctx_.check_status())) {
+    } else if (MY_SPEC.is_vectorized()) {
+      const ObBatchRows *batch = nullptr;
+      const int64_t count = std::min<int64_t>(MY_SPEC.max_batch_size_, top_limit_cnt_ - rows);
+      if (OB_FAIL(child_->get_next_batch(count, batch))) {
+      } else {
+        ObEvalCtx::BatchInfoScopeGuard guard(eval_ctx_);
+        guard.set_batch_size(batch->size_);
+        for (int64_t i = 0; OB_SUCC(ret) && i < batch->size_; ++i) {
+          if (batch->skip_->at(i)) { continue; }
+          guard.set_batch_idx(i);
+          if (OB_FAIL(write_row())) {
+          } else {
+            ++rows;
+          }
+        }
+        end = batch->end_;
+      }
+    } else if (OB_FAIL(child_->get_next_row())) {
+      if (ret == OB_ITER_END) { ret = OB_SUCCESS; end = true; }
+    } else if (OB_FAIL(write_row())) {
+    } else {
+      ++rows;
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(output.publish())) {
+  } else {
+    plan_ctx->set_affected_rows(rows);
+  }
+  return ret;
+}
+
 int ObSelectIntoOp::inner_get_next_row()
 {
+  if (MY_SPEC.file_copy_) {
+    int ret = copy_to_file();
+    return ret == OB_SUCCESS ? OB_ITER_END : ret;
+  }
   int ret = 0 == top_limit_cnt_ ? OB_ITER_END : OB_SUCCESS;
   int64_t row_count = 0;
   const ObItemType into_type = MY_SPEC.into_type_;
@@ -236,6 +340,12 @@ int ObSelectIntoOp::inner_get_next_row()
 
 int ObSelectIntoOp::inner_get_next_batch(const int64_t max_row_cnt)
 {
+  if (MY_SPEC.file_copy_) {
+    const int ret = copy_to_file();
+    brs_.size_ = 0;
+    brs_.end_ = ret == OB_SUCCESS;
+    return ret;
+  }
   int ret = OB_SUCCESS;
   const ObBatchRows *child_brs = NULL;
   int64_t batch_size = min(max_row_cnt, MY_SPEC.max_batch_size_);
@@ -1215,7 +1325,7 @@ int ObSelectIntoOp::check_secure_file_path(ObString file_name)
 #endif
     ret = OB_FILE_NOT_EXIST;
   } else if (OB_FAIL(ObSchemaUtils::get_runtime_varchar_variable(*GCTX.schema_service_,
-                                                                SYS_VAR_SECURE_FILE_PRIV,
+                                                                share::SYS_VAR_SECURE_FILE_PRIV,
                                                                 ctx_.get_allocator(),
                                                                 secure_file_priv))) {
   } else if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, actual_path))) {

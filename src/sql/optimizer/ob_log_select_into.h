@@ -48,6 +48,7 @@ public:
   {
   }
   virtual ~ObLogSelectInto() {}
+  bool file_copy_ = false;
   inline void set_into_type(ObItemType &into_type)
   {
     into_type_ = into_type;

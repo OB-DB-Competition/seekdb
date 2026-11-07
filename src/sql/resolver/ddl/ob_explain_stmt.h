@@ -50,6 +50,7 @@ public:
   ObDMLStmt* get_explain_query_stmt() const { return explain_query_stmt_; }
   void set_explain_query_stmt(ObDMLStmt *stmt) { explain_query_stmt_ = stmt; }
   bool is_select_explain() const;
+  bool file_describe_ = false;
   const common::ObString& get_into_table() const { return into_table_; }
   void set_into_table(const common::ObString& into_table) { into_table_ = into_table; }
   const common::ObString& get_statement_id() const { return statement_id_; }

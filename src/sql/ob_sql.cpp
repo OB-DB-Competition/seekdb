@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL
+#include "sql/resolver/ddl/ob_explain_stmt.h"
 #include "config_bridge.h"
 #include "sql/ob_sql.h"
 #include "lib/json/ob_json_print_utils.h"
@@ -281,7 +282,14 @@ int ObSql::fill_result_set(ObResultSet &result_set,
       field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
       field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
       field.type_.set_varchar(type_name);
-      if (OB_FAIL(result_set.reserve_field_columns(1))) {
+      const bool describe = static_cast<const ObExplainStmt &>(basic_stmt).file_describe_;
+      const char *columns[] = {"column_name", "column_type", "null", "key", "default", "extra"};
+      if (OB_FAIL(result_set.reserve_field_columns(describe ? 6 : 1))) {
+      } else if (describe) {
+        for (const char *column : columns) {
+          field.cname_ = field.org_cname_ = ObString(column);
+          if (OB_FAIL(result_set.add_field_column(field))) { break; }
+        }
       } else if (OB_FAIL(result_set.add_field_column(field))) {
       }
       break;
@@ -3528,7 +3536,8 @@ int ObSql::need_add_plan(const ObPlanCacheCtx &pc_ctx,
   } else if (OB_ISNULL(result.get_exec_context().get_stmt_factory())
              || OB_ISNULL(result.get_exec_context().get_stmt_factory()->get_query_ctx())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (result.get_exec_context().get_stmt_factory()->get_query_ctx()->has_hybrid_search()) {
+  } else if (result.get_exec_context().get_stmt_factory()->get_query_ctx()->has_hybrid_search()
+             || result.get_exec_context().get_stmt_factory()->get_query_ctx()->has_file_sql_) {
     need_add_plan = false;
   }
   return ret;

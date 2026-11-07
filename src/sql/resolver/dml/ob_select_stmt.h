@@ -115,6 +115,7 @@ struct SelectItem
 
 struct ObSelectIntoItem
 {
+  bool file_copy_ = false;
   ObSelectIntoItem()
       : into_type_(),
         outfile_name_(),
@@ -144,6 +145,7 @@ struct ObSelectIntoItem
   }
   int assign(const ObSelectIntoItem &other) {
     into_type_ = other.into_type_;
+    file_copy_ = other.file_copy_;
     outfile_name_ = other.outfile_name_;
     field_str_ = other.field_str_;
     line_str_ = other.line_str_;
